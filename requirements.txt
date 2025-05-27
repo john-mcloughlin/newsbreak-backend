@@ -5,3 +5,5 @@ requests
 google-api-python-client
 elevenlabs
 python-dotenv
+fastapi
+uvicorn[standard]
