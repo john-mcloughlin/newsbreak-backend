@@ -1,0 +1,7 @@
+flask
+gtts
+openai
+requests
+google-api-python-client
+elevenlabs
+python-dotenv
