@@ -1,12 +1,11 @@
 """
 FastAPI implementation for Podcastify podcast generation service.
-
-This module provides REST endpoints for podcast generation and audio serving,
-with configuration management and temporary file handling.
+Provides endpoints for podcast generation, audio summary, health checks, and audio file serving.
 """
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
 import os
 import shutil
 import yaml
@@ -15,7 +14,12 @@ from pathlib import Path
 from ..client import generate_podcast
 import uvicorn
 
+# Setup
+app = FastAPI()
+TEMP_DIR = os.path.join(os.path.dirname(__file__), "temp_audio")
+os.makedirs(TEMP_DIR, exist_ok=True)
 
+# Helpers
 def load_base_config() -> Dict[Any, Any]:
     config_path = Path(__file__).parent / "podcastfy" / "conversation_config.yaml"
     try:
@@ -26,47 +30,28 @@ def load_base_config() -> Dict[Any, Any]:
         return {}
 
 def merge_configs(base_config: Dict[Any, Any], user_config: Dict[Any, Any]) -> Dict[Any, Any]:
-    """Merge user configuration with base configuration, preferring user values."""
     merged = base_config.copy()
-    
-    # Handle special cases for nested dictionaries
     if 'text_to_speech' in merged and 'text_to_speech' in user_config:
         merged['text_to_speech'].update(user_config.get('text_to_speech', {}))
-    
-    # Update top-level keys
     for key, value in user_config.items():
-        if key != 'text_to_speech':  # Skip text_to_speech as it's handled above
-            if value is not None:  # Only update if value is not None
-                merged[key] = value
-                
+        if key != 'text_to_speech' and value is not None:
+            merged[key] = value
     return merged
 
-app = FastAPI()
-
-TEMP_DIR = os.path.join(os.path.dirname(__file__), "temp_audio")
-os.makedirs(TEMP_DIR, exist_ok=True)
-
+# Endpoint: Podcast Generation
 @app.post("/generate")
 async def generate_podcast_endpoint(data: dict):
-    """"""
     try:
-        # Set environment variables
-        os.environ['OPENAI_API_KEY'] = data.get('openai_key')
-        os.environ['GEMINI_API_KEY'] = data.get('google_key')
-        os.environ['ELEVENLABS_API_KEY'] = data.get('elevenlabs_key')
+        os.environ['OPENAI_API_KEY'] = data.get('openai_key', '')
+        os.environ['GEMINI_API_KEY'] = data.get('google_key', '')
+        os.environ['ELEVENLABS_API_KEY'] = data.get('elevenlabs_key', '')
 
-        # Load base configuration
         base_config = load_base_config()
-        
-        # Get TTS model and its configuration from base config
         tts_model = data.get('tts_model', base_config.get('text_to_speech', {}).get('default_tts_model', 'openai'))
         tts_base_config = base_config.get('text_to_speech', {}).get(tts_model, {})
-        
-        # Get voices (use user-provided voices or fall back to defaults)
         voices = data.get('voices', {})
         default_voices = tts_base_config.get('default_voices', {})
-        
-        # Prepare user configuration
+
         user_config = {
             'creativity': float(data.get('creativity', base_config.get('creativity', 0.7))),
             'conversation_style': data.get('conversation_style', base_config.get('conversation_style', [])),
@@ -88,15 +73,8 @@ async def generate_podcast_endpoint(data: dict):
             }
         }
 
-        # print(user_config)
-
-        # Merge configurations
         conversation_config = merge_configs(base_config, user_config)
 
-        # print(conversation_config)
-        
-
-        # Generate podcast
         result = generate_podcast(
             urls=data.get('urls', []),
             conversation_config=conversation_config,
@@ -105,36 +83,45 @@ async def generate_podcast_endpoint(data: dict):
             read_time=int(data.get('read_time', 3)),
             reading_speed=data.get('reading_speed', 'normal')
         )
-        # Handle the result
+
+        filename = f"podcast_{os.urandom(8).hex()}.mp3"
+        output_path = os.path.join(TEMP_DIR, filename)
+
         if isinstance(result, str) and os.path.isfile(result):
-            filename = f"podcast_{os.urandom(8).hex()}.mp3"
-            output_path = os.path.join(TEMP_DIR, filename)
             shutil.copy2(result, output_path)
-            return {"audioUrl": f"/audio/{filename}"}
-        elif hasattr(result, 'audio_path'):
-            filename = f"podcast_{os.urandom(8).hex()}.mp3"
-            output_path = os.path.join(TEMP_DIR, filename)
+        elif hasattr(result, 'audio_path') and os.path.isfile(result.audio_path):
             shutil.copy2(result.audio_path, output_path)
-            return {"audioUrl": f"/audio/{filename}"}
         else:
             raise HTTPException(status_code=500, detail="Invalid result format")
+
+        return {"audioUrl": f"/audio/{filename}"}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# Endpoint: Serve Audio Files
 @app.get("/audio/{filename}")
 async def serve_audio(filename: str):
-    """ Get File Audio From ther Server"""
     file_path = os.path.join(TEMP_DIR, filename)
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(file_path)
 
+# Endpoint: Health Check
 @app.get("/health")
 async def healthcheck():
     return {"status": "healthy"}
 
+# ✅ NEW: /audio-summary endpoint for frontend integration
+class SummaryRequest(BaseModel):
+    text: str
+
+@app.post("/audio-summary")
+async def generate_audio_summary(data: SummaryRequest):
+    return {"message": f"Audio summary for: {data.text}"}
+
+# Uvicorn startup
 if __name__ == "__main__":
-    host = os.getenv("HOST", "127.0.0.1")
+    host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", 8080))
     uvicorn.run(app, host=host, port=port)
